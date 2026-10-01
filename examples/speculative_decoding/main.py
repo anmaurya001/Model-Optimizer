@@ -59,6 +59,7 @@ from modelopt.recipe.config import (
 )
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
+from modelopt.torch.speculative.plugins.hf_external import SPARSE_CAPABLE_LOSSES
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
@@ -216,6 +217,14 @@ def setup_external_draft(recipe, training_args, base_model, draft=None):
         model_max_length=training_args.training_seq_len,
         trust_remote_code=recipe.model.trust_remote_code,
     )
+    # Sparse data carries only the teacher's truncated policy. Objectives that need full
+    # teacher logits would silently train against a zero-padded distribution, so gate on
+    # the list the plugin exports.
+    if recipe.data.mode == "sparse" and external_cfg["external_loss"] not in SPARSE_CAPABLE_LOSSES:
+        raise ValueError(
+            f"data.sparse_data_path requires external.external_loss in "
+            f"{list(SPARSE_CAPABLE_LOSSES)}, got {external_cfg['external_loss']!r}."
+        )
     mtsp.convert(draft, [("external", external_cfg)])
     # Fail before training: a vocab mismatch yields a plausible loss curve and a draft
     # with no acceptance. Equal sizes are not enough -- different tokenizers are
@@ -229,16 +238,21 @@ def setup_external_draft(recipe, training_args, base_model, draft=None):
     # The norm is not always at base_model.model.norm -- FakeBaseModel keeps it at .norm
     # -- so search the same paths the other offline modes use. It stays optional;
     # _teacher_logits raises only if the dump declares a pre-norm hidden.
-    norm_path = find_final_norm_path(base_model)
-    base_final_norm = base_model.get_submodule(norm_path) if norm_path else None
-    # Attach on the device training will run on: the draft is loaded with
-    # device_map="cpu", so otherwise the first forward moves the copies mid-step on
-    # every rank. training_args.device is the device accelerate assigned this process,
-    # which is correct both when every rank sees all GPUs and when CUDA_VISIBLE_DEVICES
-    # pins one GPU per rank -- local_rank arithmetic gets the second case wrong.
-    draft.attach_base_lm_head(
-        base_model.get_output_embeddings(), base_final_norm, device=training_args.device
-    )
+    # The sparse path carries the teacher's policy in the data, so the base lm_head is
+    # dead weight on the GPU; the base is still loaded for the vocabulary check, which is
+    # cheap under use_fake_base_for_offline.
+    if recipe.data.mode != "sparse":
+        norm_path = find_final_norm_path(base_model)
+        base_final_norm = base_model.get_submodule(norm_path) if norm_path else None
+        # Attach on the device training will run on: the draft is loaded with
+        # device_map="cpu", so otherwise the first forward moves the copies mid-step on
+        # every rank. training_args.device is the device accelerate assigned this
+        # process, which is correct both when every rank sees all GPUs and when
+        # CUDA_VISIBLE_DEVICES pins one GPU per rank -- local_rank arithmetic gets the
+        # second case wrong.
+        draft.attach_base_lm_head(
+            base_model.get_output_embeddings(), base_final_norm, device=training_args.device
+        )
     return draft, tokenizer
 
 
