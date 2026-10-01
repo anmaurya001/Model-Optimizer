@@ -57,6 +57,7 @@ from modelopt.recipe.config import (
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.speculative.external.vocab_swap import swap_draft_vocabulary
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_external import SPARSE_CAPABLE_LOSSES
@@ -173,7 +174,7 @@ def _is_hf_format_checkpoint(checkpoint: str | None) -> bool:
     return any(os.path.isfile(os.path.join(checkpoint, f)) for f in hf_files)
 
 
-def setup_external_draft(recipe, training_args, base_model, draft=None):
+def setup_external_draft(recipe, training_args, base_model, draft=None, draft_is_resumed=False):
     """Convert an external draft and wire it to the base model.
 
     Runs on both the fresh-load and the HF-resume path. The mode exports a plain HF
@@ -184,6 +185,8 @@ def setup_external_draft(recipe, training_args, base_model, draft=None):
     Args:
         base_model: the target, kept only for its lm_head and vocabulary.
         draft: the already-loaded draft on the resume path; loaded here when None.
+        draft_is_resumed: the draft came from a checkpoint this mode already converted,
+            so any vocabulary swap it needed has been applied and baked into its weights.
     """
     if recipe.draft_model_name_or_path is None:
         raise ValueError(
@@ -211,12 +214,42 @@ def setup_external_draft(recipe, training_args, base_model, draft=None):
             trust_remote_code=recipe.model.trust_remote_code,
         )
     external_cfg: dict = recipe.external.model_dump()
-    # The draft's own tokenizer; the base's is used only for its lm_head.
+    # The draft's own tokenizer, needed before conversion if its vocabulary has to be
+    # re-indexed onto the base's.
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         recipe.draft_model_name_or_path,
         model_max_length=training_args.training_seq_len,
         trust_remote_code=recipe.model.trust_remote_code,
     )
+    # Gate on the flag alone, not on a size difference: different tokenizers are
+    # routinely padded to the same width, and that is exactly the case the swap exists
+    # for. Must precede convert so the saved ModelOpt state describes the post-swap
+    # architecture. The rewrite itself is skipped on a resume: such a checkpoint already
+    # has base-indexed rows, while the tokenizer loaded above is still the original
+    # draft's, so swapping again would permute trained rows through a mapping that no
+    # longer applies and re-draw every id that tokenizer could not spell. Both
+    # validations below would still pass -- sizes match and both tokenizers are the
+    # base's by then -- so the run would resume from scrambled embeddings against a
+    # plausible loss curve.
+    if external_cfg.get("external_vocab_swap"):
+        swap_base_tokenizer = transformers.AutoTokenizer.from_pretrained(
+            recipe.model.model_name_or_path,
+            trust_remote_code=recipe.model.trust_remote_code,
+        )
+        if draft_is_resumed:
+            print_rank_0(
+                "[external] resuming an already-swapped draft; keeping its embeddings as saved"
+            )
+        else:
+            stats = swap_draft_vocabulary(draft, tokenizer, swap_base_tokenizer, base_vocab_size)
+            print_rank_0(
+                f"[external] vocabulary swapped onto the base: "
+                f"{stats['matched']}/{stats['total']} rows carried over, "
+                f"{stats['frequent_coverage']:.1%} of the first 50k ids"
+            )
+        # Either way the draft's rows are indexed by the base vocabulary from here on,
+        # so that is the tokenizer it must be validated and trained against.
+        tokenizer = swap_base_tokenizer
     # Sparse data carries only the teacher's truncated policy. Objectives that need full
     # teacher logits would silently train against a zero-padded distribution, so gate on
     # the list the plugin exports.
@@ -336,7 +369,7 @@ def train():
                 config_overrides=recipe.model.config_overrides,
             )
             model, tokenizer = setup_external_draft(
-                recipe, training_args, base_model=base_model, draft=model
+                recipe, training_args, base_model=base_model, draft=model, draft_is_resumed=True
             )
     else:
         if checkpoint:
