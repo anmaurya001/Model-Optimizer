@@ -18,8 +18,10 @@
 that fail together, the process group's lifetime, launch detection."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
+import torch
 import torch.distributed
 from torch import nn
 
@@ -31,6 +33,7 @@ from modelopt.torch.utils.distributed import (
     broadcast_from,
     distributed_run,
     distribution_plan,
+    expert_parallel_state,
     is_distributed_launch,
     set_distribution_plan,
 )
@@ -375,6 +378,32 @@ def test_a_distributed_launch_owns_the_group_even_when_the_body_raises(monkeypat
     assert calls[0] == ("setup", timedelta(hours=1))
     assert calls[1][0] == "cleanup"
     assert "calibration failed" in calls[1][1], "the error must be printed before the cleanup"
+
+
+# ---------------------------------------------------------------------------- expert parallel state
+
+
+def _state(expert_parallel: bool):
+    return SimpleNamespace(
+        expert_model_parallel_group=SimpleNamespace(is_initialized=lambda: expert_parallel)
+    )
+
+
+def test_the_routed_experts_state_is_found_by_its_expert_parallel_group():
+    model = torch.nn.Module()
+    model.attn = torch.nn.Linear(2, 2)
+    model.experts = torch.nn.Module()
+    for module in model.modules():
+        module._parallel_state = _state(expert_parallel=False)
+    model.experts._parallel_state = expert = _state(expert_parallel=True)
+    assert expert_parallel_state(model) is expert
+
+
+def test_a_model_without_expert_parallel_experts_has_no_expert_state():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    assert expert_parallel_state(model) is None
+    model[0]._parallel_state = _state(expert_parallel=False)
+    assert expert_parallel_state(model) is None
 
 
 # ------------------------------------------------------------------------------------ launch detect
