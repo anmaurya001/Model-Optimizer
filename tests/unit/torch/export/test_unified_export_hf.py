@@ -1008,3 +1008,24 @@ def test_an_unrecorded_model_derives_its_unplaced_keys_once(tmp_path, monkeypatc
         assert torch.equal(carried[mtp], torch.full((2,), 5.0))
     assert derived_from == [str(tmp_path)], "derived once, then read back"
     assert model._modelopt_unplaced_source_keys == [mtp]
+
+
+def test_a_model_built_from_a_config_names_no_source_checkpoint(tmp_path, monkeypatch):
+    """An empty ``_name_or_path`` is the working directory as a path; nothing there is the model's."""
+    from modelopt.torch.export.unified_export_hf import (
+        _copy_non_model_files_from_source,
+        _source_checkpoint,
+    )
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    (workdir / "tokenizer.json").write_text("{}")
+    monkeypatch.chdir(workdir)
+    model = SimpleNamespace(config=SimpleNamespace(_name_or_path=""))
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+
+    _copy_non_model_files_from_source(model, export_dir)
+
+    assert _source_checkpoint(model) is None
+    assert not any(export_dir.iterdir())
