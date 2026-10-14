@@ -12,8 +12,6 @@ Changelog
 
 **Bug Fixes**
 
-- Fix TensorRT inference initialization on TensorRT 11 and retain shape validation for static, dynamic, and shape-tensor inputs.
-
 - Fix ONNX preprocessing with custom TensorRT plugin libraries on TensorRT 11.
 
 0.48.0 (2026-10-xx)
@@ -147,6 +145,8 @@ Changelog
 - Deprecate ``metadata.recipe_type`` in recipe YAML, for both single-file recipes and a directory recipe's ``metadata.yml``. A recipe now says what kind it is with a ``# modelopt-schema:`` comment naming its schema class, or by delegating to a recipe that does (single-file recipes only -- a directory recipe has no body to delegate through); ``recipe_type`` is still read and still honoured, so a recipe outside this repo keeps working unchanged, but new recipes should leave it out and every recipe shipped here has been converted. Where both are present they must agree, and so must a recipe and the recipe it delegates to -- a disagreement is an error rather than a silent preference.
 
 **Bug Fixes**
+
+- Fix TensorRT inference initialization on TensorRT 11 and retain shape validation for static, dynamic, and shape-tensor inputs.
 
 - Fix Hugging Face exports classifying registered Qwen VLM parameters as unplaced source weights, which overwrote quantized tensors with original weights and incorrectly excluded their modules from quantization. Re-export affected checkpoints.
 - Right-pad labeled calibration samples to avoid fully masked causal rows that can produce non-finite cuDNN attention gradients during AutoQuantize. Generation previews remove padding before decoding.
