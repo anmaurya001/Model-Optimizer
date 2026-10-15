@@ -113,6 +113,7 @@ Changelog
 - Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. If you hit this, register a ``ModelSpec`` for the model under ``modelopt/torch/models/``. Every MoE architecture ModelOpt exported correctly before this change is registered, so no supported model regresses.
 - ``--recipe`` (and ``modelopt.recipe.load_recipe``) now resolve a recipe path **filesystem-first**: a recipe of the same relative path in the current working directory takes precedence over the shipped built-in of that name, matching how recipe ``$import`` paths already resolve. Previously the built-in won.
 - Hugging Face MoE calibration now runs fused experts on the ``grouped_mm`` backend Transformers selects by default instead of forcing ``eager``, so calibrated activation scales can differ from earlier releases: some of Qwen3-30B-A3B's moved by up to about 10%. Load the model with ``experts_implementation="eager"`` to calibrate exactly as earlier releases did.
+- ``export_hf_checkpoint`` and ``modelopt.torch.utils.dataset_utils.get_max_batch_size`` now read how a model is distributed from the plan ``load_pretrained`` records on it, and raise for an FSDP2-sharded model, or one in a multi-rank run, that carries none. If you distribute a model yourself, for example with ``fsdp2_wrap``, which records no plan, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it.
 
 **Deprecations**
 
