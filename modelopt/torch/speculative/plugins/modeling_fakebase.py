@@ -68,7 +68,7 @@ def find_final_norm_path(model) -> str | None:
     because the speculative plugins store the path and resolve it later, while callers
     that want the module can ``get_submodule`` it.
     """
-    named = dict(model.named_modules())
+    named = dict(model.named_modules(remove_duplicate=False))
     for path in _FINAL_NORM_PATHS:
         if isinstance(named.get(path), torch.nn.Module):
             return path
