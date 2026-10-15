@@ -441,6 +441,15 @@ def _load_sharded(route, plan, ckpt_path, auto_class, model_type, kwargs) -> nn.
     trust_remote_code = kwargs.pop("trust_remote_code", False)
     hf_config = kwargs.pop("hf_config", None)
     if route == _EXPERT_PARALLEL:
+        from modelopt.torch.utils.moe import apply_distributed_support
+
+        if hf_config is None:
+            hf_config = apply_distributed_support(
+                model_type,
+                AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code),
+                ckpt_path=ckpt_path,
+                trust_remote_code=trust_remote_code,
+            )
         return load_and_prepare_ep(
             ckpt_path, plan, trust_remote_code=trust_remote_code, hf_config=hf_config, **kwargs
         )
@@ -1167,13 +1176,26 @@ def resolve_distribution_plan(
     ``"auto"``. A single process holds the whole model unless ``dense="fsdp"`` asks for FSDP2 on
     one rank.
 
-    A plan that leaves an expert-parallel MoE whole on every rank raises.
+    Unless the run rules expert parallelism out (a single process, or an EP degree of 1), the
+    model's spec is applied to the config first
+    (:func:`~modelopt.torch.utils.moe.apply_distributed_support`): for several models it is what
+    supplies the expert-parallel plan, and the returned config carries it. A plan that leaves an
+    expert-parallel MoE whole on every rank raises.
     """
     from modelopt.torch.utils import distributed as dist
+    from modelopt.torch.utils.moe import apply_distributed_support
 
     _, ckpt_path = ensure_local_checkpoint(ckpt_path)
     hf_config = AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
     world_size = dist.size()
+    if world_size > 1 and str(env.ep_degree() if ep_size is None else ep_size) != "1":
+        # Before deciding: deciding without the spec would read an expert-parallel MoE as dense.
+        hf_config = apply_distributed_support(
+            hf_config.model_type,
+            hf_config,
+            ckpt_path=ckpt_path,
+            trust_remote_code=trust_remote_code,
+        )
     plan = dist.broadcast_from(
         "plan",
         lambda: _decide_distribution(
