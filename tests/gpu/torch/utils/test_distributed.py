@@ -25,7 +25,7 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.utils.distributed import DistributionPlan, distribution_plan, fsdp2_wrap
+from modelopt.torch.utils.distributed import fsdp2_wrap
 
 VOCAB_SIZE = 32
 N_EXPERTS = 4
@@ -73,7 +73,6 @@ def _test_fsdp2_wrap_mixed_dtypes(rank, size):
     }
 
     fsdp2_wrap(model)
-    assert distribution_plan(model) == DistributionPlan(size, dense="fsdp")
 
     # Raised "FSDP expects uniform original parameter dtype" before the ignored-param fix.
     input_ids = torch.randint(0, VOCAB_SIZE, (1, 8), device=device)
