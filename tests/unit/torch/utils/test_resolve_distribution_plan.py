@@ -607,17 +607,18 @@ def test_a_model_that_cannot_be_built_on_meta_names_itself(run_as, serve, monkey
 # ------------------------------------------------------------------------------ rank 0 decides
 
 
-def _as_rank(monkeypatch, rank, rank0_message=None):
-    """Run as ``rank`` of a 4-rank run, answering its broadcast; returns what this rank handed it.
+def _as_rank(monkeypatch, rank, **rank0_messages):
+    """Run as ``rank`` of a 4-rank run, answering its broadcasts; returns what this rank handed them.
 
-    A non-zero rank receives ``rank0_message``, as rank 0 would have sent it.
+    A non-zero rank receives, for each broadcast, ``rank0_messages[label]``, as rank 0 would have
+    sent it.
     """
     sent = []
 
     def broadcast_object_list(message, group=None, group_src=None):
         sent.append(message[0])
         if rank != 0:
-            message[0] = rank0_message
+            message[0] = rank0_messages[message[0][0]]
 
     monkeypatch.setattr(dist, "is_distributed_run", lambda: True)
     monkeypatch.setattr(dist, "size", lambda group=None: 4)
@@ -633,14 +634,14 @@ def test_rank0_decides_and_sends_its_plan(monkeypatch, serve, tmp_path):
 
     plan, _ = resolve_distribution_plan(str(tmp_path), dense="fsdp")
 
-    assert sent == [("plan", DistributionPlan(4, dense="fsdp"), None)]
+    assert sent == [("spec", True, None), ("plan", DistributionPlan(4, dense="fsdp"), None)]
     assert plan == DistributionPlan(4, dense="fsdp")
 
 
 def test_other_ranks_adopt_rank0s_plan_without_deciding(monkeypatch, serve, tmp_path):
     """A non-zero rank's own knobs, here a dense layout of its own, must not leak into the plan."""
     rank0_plan = DistributionPlan(4, dense="fsdp")
-    _as_rank(monkeypatch, 1, rank0_message=("plan", rank0_plan, None))
+    _as_rank(monkeypatch, 1, spec=("spec", True, None), plan=("plan", rank0_plan, None))
     serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(
         model_load_utils, "_decide_distribution", lambda *a: pytest.fail("rank 1 decided")
@@ -656,14 +657,35 @@ def test_rank0s_failure_reaches_the_broadcast_before_it_raises(monkeypatch, serv
 
     with pytest.raises(ValueError, match="must divide"):
         resolve_distribution_plan(str(tmp_path), ep_size=2)
-    ((_, plan, error),) = sent
+    (_, (_, plan, error)) = sent
     assert plan is None
     assert "ValueError" in error
 
 
 def test_other_ranks_raise_when_rank0_failed(monkeypatch, serve, tmp_path):
-    _as_rank(monkeypatch, 1, rank0_message=("plan", None, "ValueError: bad degrees"))
+    _as_rank(
+        monkeypatch,
+        1,
+        spec=("spec", True, None),
+        plan=("plan", None, "ValueError: bad degrees"),
+    )
     serve(LlamaConfig(**_TINY))
 
     with pytest.raises(RuntimeError, match=r"rank 0 failed to compute plan.*bad degrees"):
         resolve_distribution_plan(str(tmp_path))
+
+
+@pytest.mark.parametrize("rank0_applies", [True, False])
+def test_other_ranks_apply_the_spec_as_rank0_decided(monkeypatch, serve, tmp_path, rank0_applies):
+    """A rank whose own EP knob says otherwise follows rank 0: had it skipped the spec rank 0
+    applied, it would load without the expert-parallel plan the others shard by."""
+    monkeypatch.setenv("MODELOPT_EP_DEGREE", "auto" if not rank0_applies else "1")
+    rank0_plan = DistributionPlan(4, 4) if rank0_applies else DistributionPlan(4)
+    _as_rank(monkeypatch, 1, spec=("spec", rank0_applies, None), plan=("plan", rank0_plan, None))
+    serve(_deepseek_v3(n_routed_experts=8))
+
+    plan, hf_config = resolve_distribution_plan(str(tmp_path))
+
+    assert plan == rank0_plan
+    spec_plan = get_spec("deepseek_v3").ep_spec.base_model_ep_plan
+    assert (getattr(hf_config, "base_model_ep_plan", None) == spec_plan) is rank0_applies
